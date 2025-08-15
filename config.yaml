@@ -1,0 +1,25 @@
+# Default configuration for Mitutoyo 6200 reader
+serial:
+  port: null            # e.g., /dev/tty.usbserial-XXXX
+  baudrate: 9600
+  bytesize: 8           # 5,6,7,8
+  parity: N             # N, E, O, M, S
+  stopbits: 1           # 1, 1.5, 2
+  timeout: 1.0          # seconds, read timeout
+
+protocol:
+  type: mitutoyo6200    # reserved for future multi-protocol support
+  line_ending: "\r\n"   # expected line ending from device
+
+classification:
+  mode: threshold       # threshold | window | none
+  units: mm             # for display only
+  threshold:
+    operator: between   # lt, le, gt, ge, eq, between
+    low: 0.0
+    high: 10.0
+
+logging:
+  csv_path: logs/readings.csv
+  append: true
+  timestamp_tz: local   # local | utc

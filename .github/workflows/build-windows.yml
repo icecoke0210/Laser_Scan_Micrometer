@@ -1,0 +1,51 @@
+name: Build Windows Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executables with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller gui.py --name LSM-GUI --noconsole --onefile --clean --add-data "config.yaml;." --collect-all PySide6
+          pyinstaller run.py --name LSM-Reader --onefile --clean --add-data "config.yaml;." --collect-all PySide6
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --no-progress -y
+
+      - name: Build installer with Inno Setup
+        run: |
+          "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\lsm_setup.iss
+
+      - name: Upload artifacts (EXEs and Installer)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LSM-Windows-Build
+          path: |
+            dist/LSM-GUI.exe
+            dist/LSM-Reader.exe
+            installer/Output/LSM-Setup.exe
