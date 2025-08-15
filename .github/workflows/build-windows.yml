@@ -52,12 +52,20 @@ jobs:
         run: |
           "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\lsm_setup.iss
 
+      - name: Debug list build outputs
+        shell: pwsh
+        run: |
+          echo "Root contents:"; Get-ChildItem -Force | Format-List
+          echo "Dist contents:"; if (Test-Path dist) { Get-ChildItem dist -Force | Format-List } else { echo "dist not found" }
+          echo "Installer Output:"; if (Test-Path installer\Output) { Get-ChildItem installer\Output -Force | Format-List } else { echo "installer\\Output not found" }
+
       - name: Upload artifacts (EXEs and Installer)
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
           name: LSM-Windows-Build
           retention-days: 14
+          if-no-files-found: error
           path: |
             dist/LSM-GUI.exe
             dist/LSM-Reader.exe
@@ -67,6 +75,8 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
           files: |
             installer/Output/LSM-Setup.exe
             dist/LSM-GUI.exe
