@@ -21,6 +21,14 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~\AppData\Local\pip\Cache
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -30,8 +38,8 @@ jobs:
       - name: Build executables with PyInstaller
         shell: pwsh
         run: |
-          pyinstaller gui.py --name LSM-GUI --noconsole --onefile --clean --add-data "config.yaml;." --collect-all PySide6
-          pyinstaller run.py --name LSM-Reader --onefile --clean --add-data "config.yaml;." --collect-all PySide6
+          pyinstaller gui.py --name LSM-GUI --noconsole --onefile --clean --add-data "config.yaml;." --collect-all PySide6 --hidden-import serial --hidden-import serial.tools.list_ports
+          pyinstaller run.py --name LSM-Reader --onefile --clean --add-data "config.yaml;." --collect-all PySide6 --hidden-import serial --hidden-import serial.tools.list_ports
 
       - name: Install Inno Setup
         run: |
@@ -49,3 +57,12 @@ jobs:
             dist/LSM-GUI.exe
             dist/LSM-Reader.exe
             installer/Output/LSM-Setup.exe
+
+      - name: Create GitHub Release and upload binaries
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            installer/Output/LSM-Setup.exe
+            dist/LSM-GUI.exe
+            dist/LSM-Reader.exe
