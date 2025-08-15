@@ -2,7 +2,7 @@
 ; Save as installer/lsm_setup.iss and build with ISCC.exe
 
 #define AppName "Laser Scan Micrometer"
-#define AppVersion "1.0.1"
+#define AppVersion "1.0.2"
 #define AppPublisher "Your Company"
 #define AppExeGui "LSM-GUI.exe"
 #define AppExeReader "LSM-Reader.exe"
