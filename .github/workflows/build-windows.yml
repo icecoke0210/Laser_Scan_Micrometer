@@ -49,6 +49,7 @@ jobs:
           choco install innosetup --no-progress -y
 
       - name: Build installer with Inno Setup
+        shell: cmd
         run: |
           "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" installer\lsm_setup.iss
 
