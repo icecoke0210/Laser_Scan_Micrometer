@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 import datetime as dt
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QThread, Signal, QObject
 from PySide6.QtGui import QFont, QColor, QPalette, QDesktopServices
 from PySide6.QtWidgets import (
     QApplication,
@@ -20,27 +20,80 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QDialogButtonBox,
     QMessageBox,
+    QComboBox,
+    QTabWidget,
 )
 
 from lsm6200.config import load_config
 from lsm6200.simulator import MicrometerSimulator
 from lsm6200.processing import process_value, classify_six_bins
 from lsm6200.logging_utils import CsvLogger
+from lsm6200.serial_utils import available_ports, managed_serial
+from lsm6200.protocols import Mitutoyo6200Parser
+from lsm6200.classifier import classify_value
+
+
+class SerialWorker(QObject):
+    measurement = Signal(float, str, str, str, str)  # value, unit, verdict, reason, raw
+    status = Signal(str)
+    error = Signal(str)
+    finished = Signal()
+
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self._running = False
+
+    def start(self):
+        self._running = True
+        parser = Mitutoyo6200Parser(expected_unit=self.cfg.classification.units)
+        try:
+            with managed_serial(
+                port=self.cfg.serial.port,
+                baudrate=self.cfg.serial.baudrate,
+                bytesize=self.cfg.serial.bytesize,
+                parity=self.cfg.serial.parity,
+                stopbits=self.cfg.serial.stopbits,
+                timeout=self.cfg.serial.timeout,
+            ) as ser, CsvLogger(self.cfg.logging) as csvlog:
+                self.status.emit("connected")
+                while self._running:
+                    line = ser.readline()
+                    if not line:
+                        continue
+                    meas = parser.parse_line(line)
+                    if not meas:
+                        continue
+                    res = classify_value(meas.value, self.cfg.classification)
+                    csvlog.log(meas.value, meas.unit, res.verdict, res.reason or "", meas.raw)
+                    self.measurement.emit(meas.value, meas.unit or "", res.verdict, res.reason or "", meas.raw)
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.status.emit("disconnected")
+            self.finished.emit()
+
+    def stop(self):
+        self._running = False
 
 
 class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Laser Scan Micrometer DEMO")
+        self.setWindowTitle("Laser Scan Micrometer")
         self.cfg = load_config()
         self.sim = MicrometerSimulator()
         self.csv_logger = None  # type: ignore
         self.standard = 0.110  # default standard before user setup
         self.session_started = False
+        self.thread: QThread | None = None
+        self.worker: SerialWorker | None = None
+        self.live_connected = False
 
         self._build_ui()
         self._update_category_style("#444444")
-        self._prompt_measurement_setup()
+        # Default to Live tab but without connecting; user can switch to Sim
+        self._refresh_ports()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -48,17 +101,49 @@ class MainWindow(QWidget):
         root.setSpacing(12)
 
         # Header
-        title = QLabel("雷射量測 DEMO（無硬體）")
+        title = QLabel("雷射量測（Live / 模擬）")
         title.setAlignment(Qt.AlignLeft)
         title.setFont(QFont("Arial", 18, QFont.Bold))
         root.addWidget(title)
+
+        # Tabs for Live/Sim
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs)
+
+        # Build Live tab
+        live_tab = QWidget()
+        live_layout = QVBoxLayout(live_tab)
+
+        port_layout = QHBoxLayout()
+        self.cmb_ports = QComboBox()
+        self.btn_refresh_ports = QPushButton("重新掃描")
+        self.btn_connect = QPushButton("連線")
+        self.btn_disconnect = QPushButton("中止")
+        self.btn_disconnect.setEnabled(False)
+        port_layout.addWidget(QLabel("COM 埠："))
+        port_layout.addWidget(self.cmb_ports)
+        port_layout.addWidget(self.btn_refresh_ports)
+        port_layout.addStretch(1)
+        port_layout.addWidget(self.btn_connect)
+        port_layout.addWidget(self.btn_disconnect)
+        live_layout.addLayout(port_layout)
+
+        self.live_status = QLabel("狀態：未連線")
+        self.live_status.setStyleSheet("color:#666;")
+        live_layout.addWidget(self.live_status)
+
+        self.tabs.addTab(live_tab, "連線模式")
+
+        # Build Sim tab (existing UI)
+        sim_tab = QWidget()
+        sim_layout = QVBoxLayout(sim_tab)
 
         # Category display
         self.category_label = QLabel("分類：—")
         self.category_label.setAlignment(Qt.AlignCenter)
         self.category_label.setFont(QFont("Arial", 28, QFont.Bold))
         self.category_label.setAutoFillBackground(True)
-        root.addWidget(self.category_label)
+        sim_layout.addWidget(self.category_label)
 
         # Values box
         values_box = QGroupBox("數值顯示")
@@ -70,11 +155,11 @@ class MainWindow(QWidget):
         form.addRow("截斷至萬分位（4位）:", self.cut4)
         form.addRow("四捨五入至千分位（3位）:", self.round3)
         values_box.setLayout(form)
-        root.addWidget(values_box)
+        sim_layout.addWidget(values_box)
 
         # Controls
         ctrl_layout = QHBoxLayout()
-        self.btn_run = QPushButton("RUN 測量")
+        self.btn_run = QPushButton("RUN 模擬")
         self.btn_run.clicked.connect(self.on_run)
         self.chk_log = QCheckBox("紀錄至 CSV")
         self.chk_log.setChecked(True)
@@ -86,12 +171,21 @@ class MainWindow(QWidget):
         ctrl_layout.addWidget(self.chk_log)
         ctrl_layout.addWidget(self.btn_view_report)
         ctrl_layout.addStretch(1)
-        root.addLayout(ctrl_layout)
+        sim_layout.addLayout(ctrl_layout)
 
         # Footer hint
-        hint = QLabel("說明：每次按下 RUN 會模擬一次測量並依規則分類；CSV 輸出路徑於 config.yaml")
+        hint = QLabel("說明：Live 連線可即時接收並紀錄；模擬模式按 RUN 產生測量並依規則分類；CSV 路徑於 config.yaml")
         hint.setStyleSheet("color: #666;")
-        root.addWidget(hint)
+        sim_layout.addWidget(hint)
+
+        self.tabs.addTab(sim_tab, "模擬模式")
+
+        # Wire Live tab actions
+        self.btn_refresh_ports.clicked.connect(self._refresh_ports)
+        self.btn_connect.clicked.connect(self.on_connect)
+        self.btn_disconnect.clicked.connect(self.on_disconnect)
+        # Prompt sim measurement setup initially
+        self._prompt_measurement_setup()
 
     def _update_category_style(self, color_hex: str):
         pal = self.category_label.palette()
@@ -212,6 +306,80 @@ class MainWindow(QWidget):
             except Exception:
                 pass
 
+    # Live mode helpers
+    def _refresh_ports(self):
+        try:
+            ports = available_ports()
+        except Exception:
+            ports = []
+        current = self.cfg.serial.port or ""
+        self.cmb_ports.clear()
+        for p in ports:
+            self.cmb_ports.addItem(p)
+        if current:
+            idx = self.cmb_ports.findText(current)
+            if idx >= 0:
+                self.cmb_ports.setCurrentIndex(idx)
+        self.live_status.setText("狀態：待連線" if ports else "狀態：未找到可用 COM")
+
+    def on_connect(self):
+        if self.live_connected:
+            return
+        port = self.cmb_ports.currentText().strip()
+        if not port:
+            QMessageBox.warning(self, "未選擇 COM", "請先選擇可用的 COM 埠")
+            return
+        self.cfg.serial.port = port
+        # Start worker thread
+        self.thread = QThread()
+        self.worker = SerialWorker(self.cfg)
+        self.worker.moveToThread(self.thread)
+        self.thread.started.connect(self.worker.start)
+        self.worker.measurement.connect(self._on_live_measurement)
+        self.worker.status.connect(self._on_live_status)
+        self.worker.error.connect(self._on_live_error)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self._on_thread_finished)
+        self.thread.start()
+        self.btn_connect.setEnabled(False)
+        self.btn_disconnect.setEnabled(True)
+        self.live_status.setText(f"狀態：連線中 ({port})")
+
+    def on_disconnect(self):
+        if self.worker:
+            self.worker.stop()
+        self.btn_disconnect.setEnabled(False)
+
+    def _on_live_measurement(self, value: float, unit: str, verdict: str, reason: str, raw: str):
+        # Map verdict to color similar to CLI
+        color = "#2e7d32" if verdict == "PASS" else ("#c62828" if verdict == "FAIL" else "#f9a825")
+        self.category_label.setText(f"分類：{verdict}  ({reason})")
+        self._update_category_style(color)
+        # Update numeric labels (unit assumes mm unless otherwise provided)
+        self.raw5.setText(f"{value:.5f} {unit or 'mm'}")
+        self.cut4.setText(f"{value:.4f} {unit or 'mm'}")
+        self.round3.setText(f"{value:.3f} {unit or 'mm'}")
+
+    def _on_live_status(self, s: str):
+        if s == "connected":
+            self.live_connected = True
+            self.live_status.setText(f"狀態：已連線 ({self.cfg.serial.port})")
+        elif s == "disconnected":
+            self.live_connected = False
+            self.live_status.setText("狀態：未連線")
+            self.btn_connect.setEnabled(True)
+            self.btn_disconnect.setEnabled(False)
+
+    def _on_live_error(self, msg: str):
+        QMessageBox.critical(self, "連線錯誤", msg)
+
+    def _on_thread_finished(self):
+        if self.thread:
+            self.thread.deleteLater()
+            self.thread = None
+        self.worker = None
+
     def on_view_report(self):
         """Open the current session CSV if available; otherwise open the logs directory.
         """
@@ -242,7 +410,7 @@ class MainWindow(QWidget):
 def main():
     app = QApplication(sys.argv)
     w = MainWindow()
-    w.resize(700, 420)
+    w.resize(800, 520)
     w.show()
     sys.exit(app.exec())
 
